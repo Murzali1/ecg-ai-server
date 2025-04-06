@@ -1,52 +1,44 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import tensorflow as tf
-import numpy as np
-import base64
-import io
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import JSONResponse
 from PIL import Image
-import json
+import io
+import torch
+import torchvision.transforms as transforms
 
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"]
-)
+# Заглушка модели (вместо настоящей)
+class DummyModel(torch.nn.Module):
+    def forward(self, x):
+        return torch.tensor([[0.1, 0.3, 0.6]])  # Пример предсказания
 
-model = tf.keras.models.load_model("model/model.h5")
-with open("model/labels.json", "r", encoding="utf-8") as f:
-    labels = json.load(f)
+# Заменить на torch.load('model/model.pt') при наличии настоящей модели
+model = DummyModel()
+model.eval()
 
-class ImagePayload(BaseModel):
-    image: str
+# Заменить на загрузку из JSON при необходимости
+labels = ["Норма", "AV-блокада", "Инфаркт миокарда"]
 
-def preprocess_image(base64_string):
-    header, encoded = base64_string.split(",", 1)
-    img_bytes = base64.b64decode(encoded)
-    image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    image = image.resize((224, 224))
-    image = np.array(image) / 255.0
-    return np.expand_dims(image, axis=0)
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+])
 
 @app.post("/analyze-ecg")
-async def analyze_ecg(payload: ImagePayload):
-    image = preprocess_image(payload.image)
-    prediction = model.predict(image)[0]
-    class_index = int(np.argmax(prediction))
-    confidence = float(np.max(prediction))
-    return {
-        "diagnosis": labels[class_index],
-        "confidence": round(confidence, 4),
-        "advice": get_advice(labels[class_index])
+async def analyze_ecg(file: UploadFile = File(...)):
+    contents = await file.read()
+    image = Image.open(io.BytesIO(contents)).convert("RGB")
+    input_tensor = transform(image).unsqueeze(0)
+
+    with torch.no_grad():
+        predictions = model(input_tensor)
+        predicted_class = predictions.argmax().item()
+        confidence = torch.softmax(predictions, dim=1)[0][predicted_class].item()
+
+    result = {
+        "class_index": predicted_class,
+        "class_name": labels[predicted_class],
+        "confidence": round(confidence, 4)
     }
 
-def get_advice(diagnosis):
-    if "AV" in diagnosis:
-        return "Противопоказано введение метопролола"
-    elif "инфаркт" in diagnosis.lower():
-        return "Пациенту требуется неотложная помощь"
-    return "Метопролол может быть применён"
+    return JSONResponse(content=result)
